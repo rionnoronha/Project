@@ -6,6 +6,7 @@ const API_BASE_URLS = [
   'http://127.0.0.1:8000',
   'http://localhost:8000',
 ].filter(Boolean)
+
 const sidebarItems = ['Dashboard', 'Students', 'Reports', 'Settings']
 const initialFormState = {
   student_id: '',
@@ -33,6 +34,7 @@ const normalizeStudent = (student) => ({
   id: student.student_id ?? student.id ?? '',
   name: student.name ?? 'Unnamed student',
   department: student.department_name || (student.department_id ? `Department ${student.department_id}` : 'General Studies'),
+  departmentName: student.department_name || '',
   departmentCode: student.department_code || '',
   year: student.admission_year ?? '',
   status: normalizeStatus(student.status),
@@ -45,18 +47,21 @@ function App() {
   const [students, setStudents] = useState([])
   const [departments, setDepartments] = useState([])
   const [searchTerm, setSearchTerm] = useState('')
-  const [filterStatus, setFilterStatus] = useState('All')
+  const [departmentFilter, setDepartmentFilter] = useState('All')
+  const [statusFilter, setStatusFilter] = useState('All')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [showModal, setShowModal] = useState(false)
+  const [modalState, setModalState] = useState({ open: false, mode: 'create' })
+  const [selectedStudent, setSelectedStudent] = useState(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [apiBaseUrl, setApiBaseUrl] = useState(API_BASE_URLS[0] || 'http://127.0.0.1:8000')
   const [formData, setFormData] = useState(initialFormState)
   const [formErrors, setFormErrors] = useState({})
-  const [submitStatus, setSubmitStatus] = useState(null)
-  const [deleteState, setDeleteState] = useState({})
+  const [feedback, setFeedback] = useState(null)
+  const [deleteTarget, setDeleteTarget] = useState(null)
+  const [settingsSection, setSettingsSection] = useState('Profile')
 
-  const loadStudents = async () => {
+  const loadData = async () => {
     let lastError = null
 
     try {
@@ -65,57 +70,47 @@ function App() {
 
       for (const baseUrl of API_BASE_URLS) {
         try {
-          const response = await fetch(`${baseUrl}/students/`, {
-            headers: {
-              Accept: 'application/json',
-            },
+          const studentsResponse = await fetch(`${baseUrl}/students/`, {
+            headers: { Accept: 'application/json' },
           })
 
-          if (!response.ok) {
+          if (!studentsResponse.ok) {
             throw new Error('Unable to load students from the backend.')
           }
 
-          const data = await response.json()
-          const normalizedStudents = Array.isArray(data) ? data.map(normalizeStudent) : []
+          const studentsPayload = await studentsResponse.json()
+          const normalizedStudents = Array.isArray(studentsPayload) ? studentsPayload.map(normalizeStudent) : []
+
+          const departmentsResponse = await fetch(`${baseUrl}/departments/`)
+          if (!departmentsResponse.ok) {
+            throw new Error('Unable to load departments from the backend.')
+          }
+
+          const departmentsPayload = await departmentsResponse.json()
+          const normalizedDepartments = Array.isArray(departmentsPayload) ? departmentsPayload : []
+
           setApiBaseUrl(baseUrl)
           setStudents(normalizedStudents)
+          setDepartments(normalizedDepartments)
           return
         } catch (err) {
           lastError = err
         }
       }
 
-      throw lastError || new Error('Unable to load students from the backend.')
+      throw lastError || new Error('Unable to load student data from the backend.')
     } catch (err) {
-      setError(err.message || 'Unable to load students from the backend.')
+      setError(err.message || 'Unable to load student data from the backend.')
       setStudents([])
+      setDepartments([])
     } finally {
       setLoading(false)
     }
   }
 
-  const loadDepartments = async () => {
-    try {
-      const response = await fetch(`${apiBaseUrl}/departments/`)
-      if (!response.ok) {
-        throw new Error('Unable to load departments from the backend.')
-      }
-      const data = await response.json()
-      setDepartments(Array.isArray(data) ? data : [])
-    } catch {
-      setDepartments([])
-    }
-  }
-
   useEffect(() => {
-    loadStudents()
+    loadData()
   }, [])
-
-  useEffect(() => {
-    if (apiBaseUrl) {
-      loadDepartments()
-    }
-  }, [apiBaseUrl])
 
   const stats = useMemo(() => {
     const total = students.length
@@ -133,25 +128,66 @@ function App() {
 
   const filteredStudents = useMemo(() => {
     return students.filter((student) => {
-      const query = `${student.name} ${student.department} ${student.id}`.toLowerCase()
-      const matchesSearch = query.includes(searchTerm.toLowerCase())
-      const matchesFilter = filterStatus === 'All' || student.status === filterStatus
-      return matchesSearch && matchesFilter
+      const combined = `${student.name} ${student.department} ${student.id} ${student.departmentCode}`.toLowerCase()
+      const matchesSearch = combined.includes(searchTerm.toLowerCase())
+      const matchesDepartment = departmentFilter === 'All' || student.departmentCode === departmentFilter
+      const matchesStatus = statusFilter === 'All' || student.status === statusFilter
+      return matchesSearch && matchesDepartment && matchesStatus
     })
-  }, [filterStatus, searchTerm, students])
+  }, [departmentFilter, searchTerm, statusFilter, students])
 
-  const openModal = () => {
-    setShowModal(true)
+  const departmentBreakdown = useMemo(() => {
+    const order = ['ISE', 'CSE', 'AIML', 'ECE']
+    return order.map((code) => ({
+      code,
+      count: students.filter((student) => student.departmentCode?.toUpperCase() === code).length,
+    }))
+  }, [students])
+
+  const totalDepartmentCount = departmentBreakdown.reduce((sum, item) => sum + item.count, 0)
+
+  const openCreateModal = () => {
+    setModalState({ open: true, mode: 'create' })
+    setSelectedStudent(null)
     setFormData(initialFormState)
     setFormErrors({})
-    setSubmitStatus(null)
+    setFeedback(null)
+  }
+
+  const openViewModal = (student) => {
+    setModalState({ open: true, mode: 'view' })
+    setSelectedStudent(student)
+    setFormData({
+      student_id: student.id,
+      name: student.name,
+      department_id: student.departmentId ?? '',
+      admission_year: student.year,
+      status: student.statusValue || student.status.toUpperCase(),
+    })
+    setFormErrors({})
+    setFeedback(null)
+  }
+
+  const openEditModal = (student) => {
+    setModalState({ open: true, mode: 'edit' })
+    setSelectedStudent(student)
+    setFormData({
+      student_id: student.id,
+      name: student.name,
+      department_id: student.departmentId ?? '',
+      admission_year: student.year,
+      status: student.statusValue || student.status.toUpperCase(),
+    })
+    setFormErrors({})
+    setFeedback(null)
   }
 
   const closeModal = () => {
-    setShowModal(false)
+    setModalState({ open: false, mode: 'create' })
+    setSelectedStudent(null)
     setIsSubmitting(false)
     setFormErrors({})
-    setSubmitStatus(null)
+    setFeedback(null)
   }
 
   const handleInputChange = (event) => {
@@ -191,7 +227,7 @@ function App() {
     return Object.keys(nextErrors).length === 0
   }
 
-  const handleSubmit = async (event) => {
+  const handleCreateOrUpdate = async (event) => {
     event.preventDefault()
 
     if (!validateForm()) {
@@ -199,7 +235,7 @@ function App() {
     }
 
     setIsSubmitting(true)
-    setSubmitStatus(null)
+    setFeedback(null)
 
     try {
       const payload = {
@@ -210,11 +246,14 @@ function App() {
         status: formData.status.trim().toUpperCase() || 'ACTIVE',
       }
 
-      const response = await fetch(`${apiBaseUrl}/students/`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+      const url = modalState.mode === 'edit' && selectedStudent
+        ? `${apiBaseUrl}/students/${encodeURIComponent(selectedStudent.id)}`
+        : `${apiBaseUrl}/students/`
+      const method = modalState.mode === 'edit' && selectedStudent ? 'PUT' : 'POST'
+
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
 
@@ -228,29 +267,27 @@ function App() {
       }
 
       if (!response.ok) {
-        const detail = parsedResponse?.detail || parsedResponse?.message || 'Unable to create student.'
+        const detail = parsedResponse?.detail || parsedResponse?.message || 'Unable to save student.'
         throw new Error(detail)
       }
 
-      setSubmitStatus({ type: 'success', text: 'Student created successfully.' })
-      setShowModal(false)
-      await loadStudents()
+      setFeedback({ type: 'success', text: modalState.mode === 'edit' ? 'Student updated successfully.' : 'Student created successfully.' })
+      await loadData()
+      closeModal()
     } catch (err) {
-      setSubmitStatus({ type: 'error', text: err.message || 'Unable to create student.' })
-      setShowModal(true)
+      setFeedback({ type: 'error', text: err.message || 'Unable to save student.' })
     } finally {
       setIsSubmitting(false)
     }
   }
 
-  const handleDelete = async (studentId) => {
-    const confirmed = window.confirm(`Delete ${studentId}?`)
-    if (!confirmed) {
+  const confirmDelete = async () => {
+    if (!deleteTarget) {
       return
     }
 
     try {
-      const response = await fetch(`${apiBaseUrl}/students/${encodeURIComponent(studentId)}`, {
+      const response = await fetch(`${apiBaseUrl}/students/${encodeURIComponent(deleteTarget.id)}`, {
         method: 'DELETE',
       })
 
@@ -259,18 +296,13 @@ function App() {
         throw new Error(text || 'Unable to delete student.')
       }
 
-      setDeleteState({ type: 'success', text: 'Student deleted successfully.' })
-      await loadStudents()
+      setFeedback({ type: 'success', text: 'Student deleted successfully.' })
+      await loadData()
     } catch (err) {
-      setDeleteState({ type: 'error', text: err.message || 'Unable to delete student.' })
+      setFeedback({ type: 'error', text: err.message || 'Unable to delete student.' })
+    } finally {
+      setDeleteTarget(null)
     }
-  }
-
-  const cycleFilter = () => {
-    const order = ['All', 'Active', 'Graduated', 'Inactive']
-    const currentIndex = order.indexOf(filterStatus)
-    const nextIndex = (currentIndex + 1) % order.length
-    setFilterStatus(order[nextIndex])
   }
 
   const renderDashboard = () => (
@@ -281,14 +313,42 @@ function App() {
           <h1>Good afternoon</h1>
           <p className="subtitle">Here&apos;s what&apos;s happening across your student records.</p>
         </div>
-        <button className="primary-btn" type="button" onClick={openModal}>
-          Add Student
-        </button>
+        <div className="top-bar-actions">
+          <div className="pill">{new Date().toLocaleDateString('en', { month: 'short', day: 'numeric' })}</div>
+          <button className="primary-btn" type="button" onClick={openCreateModal}>Add Student</button>
+        </div>
       </header>
+
+      <section className="hero-grid" aria-label="Dashboard overview">
+        <div className="hero-card">
+          <div className="hero-copy">
+            <p className="eyebrow">STUDENT PROFILE MANAGEMENT</p>
+            <h2>Calm, precise administration for every academic record.</h2>
+            <p>Monitor student profiles, department distribution, and operational status from a single premium workspace.</p>
+          </div>
+          <div className="hero-chip-row">
+            <span className="chip">Live API</span>
+            <span className="chip">Real records</span>
+            <span className="chip">Secure flow</span>
+          </div>
+        </div>
+
+        <div className="hero-card compact">
+          <div className="mini-card">
+            <span className="mini-label">Current view</span>
+            <strong>Dashboard</strong>
+          </div>
+          <div className="mini-card">
+            <span className="mini-label">Active roster</span>
+            <strong>{students.length} students</strong>
+          </div>
+        </div>
+      </section>
 
       <section className="stats-grid" aria-label="Student statistics">
         {stats.map((stat, index) => (
           <article key={stat.label} className="stat-card" style={{ animationDelay: `${index * 80}ms` }}>
+            <div className="stat-icon" aria-hidden="true">◌</div>
             <span>{stat.label}</span>
             <strong>{stat.value}</strong>
             <small>{stat.note}</small>
@@ -296,79 +356,106 @@ function App() {
         ))}
       </section>
 
-      <section className="students-panel">
-        <div className="panel-header">
-          <div>
-            <h2>Students</h2>
-            <p>Track admissions, status, and academic progress.</p>
+      <section className="content-grid">
+        <article className="glass-panel overview-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">DEPARTMENT DISTRIBUTION</p>
+              <h3>Student overview</h3>
+            </div>
+            <button className="ghost-btn" type="button" onClick={() => setActiveView('Students')}>View all</button>
           </div>
 
-          <div className="panel-actions">
-            <label className="search-box" htmlFor="student-search">
-              <span>⌕</span>
-              <input
-                id="student-search"
-                type="text"
-                placeholder="Search students"
-                value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
-              />
-            </label>
-            <button className="secondary-btn" type="button" onClick={cycleFilter}>
-              Filter: {filterStatus}
+          <div className="overview-layout">
+            <div className="donut-wrap" aria-label="Department distribution">
+              <div
+                className="donut"
+                style={{
+                  background: `conic-gradient(#f5f5f5 0 ${Math.round((totalDepartmentCount / Math.max(students.length, 1)) * 360)}deg, rgba(255,255,255,0.16) ${Math.round((totalDepartmentCount / Math.max(students.length, 1)) * 360)}deg 360deg)`,
+                }}
+              >
+                <div className="donut-inner">
+                  <strong>{students.length}</strong>
+                  <span>Students</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="legend-list">
+              {departmentBreakdown.map((item) => (
+                <div className="legend-item" key={item.code}>
+                  <span className="legend-swatch" />
+                  <div>
+                    <strong>{item.code}</strong>
+                    <p>{item.count} students</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </article>
+
+        <article className="glass-panel actions-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">QUICK ACTIONS</p>
+              <h3>Operational controls</h3>
+            </div>
+          </div>
+
+          <div className="action-grid">
+            <button className="action-card" type="button" onClick={openCreateModal}>
+              <span>＋</span>
+              <strong>Add Student</strong>
+            </button>
+            <button className="action-card" type="button" onClick={() => setActiveView('Reports')}>
+              <span>◧</span>
+              <strong>Generate Report</strong>
+            </button>
+            <button className="action-card" type="button" onClick={() => setActiveView('Settings')}>
+              <span>⚙</span>
+              <strong>Manage Settings</strong>
             </button>
           </div>
+        </article>
+      </section>
+
+      <section className="glass-panel table-panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">RECENT STUDENTS</p>
+            <h3>Live roster</h3>
+          </div>
+          <button className="ghost-btn" type="button" onClick={() => setActiveView('Students')}>View all</button>
         </div>
 
-        <div className="table-wrap">
-          {submitStatus && (
-            <div className={`status-banner ${submitStatus.type}`}>
-              {submitStatus.text}
-            </div>
-          )}
+        {feedback && (
+          <div className={`feedback-bar ${feedback.type}`}>{feedback.text}</div>
+        )}
 
+        <div className="table-shell">
           <div className="table-head">
             <span>Student ID</span>
             <span>Name</span>
+            <span>Program</span>
             <span>Department</span>
-            <span>Admission Year</span>
             <span>Status</span>
+            <span>Academic Year</span>
           </div>
 
-          {loading && (
-            <div className="empty-state">Loading students from the API…</div>
-          )}
-
-          {!loading && error && (
-            <div className="empty-state">{error}</div>
-          )}
-
-          {!loading && !error && filteredStudents.map((student) => (
+          {loading && <div className="empty-state">Loading the latest student records…</div>}
+          {!loading && error && <div className="empty-state">{error}</div>}
+          {!loading && !error && filteredStudents.slice(0, 6).map((student) => (
             <div className="table-row" key={student.id}>
               <span className="mono">{student.id}</span>
-              <div className="student-name">
-                <div className="avatar">{student.name.charAt(0)}</div>
-                <div>
-                  <strong>{student.name}</strong>
-                  <p>{student.department}</p>
-                </div>
-              </div>
-              <span>{student.department}</span>
+              <span>{student.name}</span>
+              <span>{student.departmentCode || 'General'}</span>
+              <span>{student.departmentName || student.department}</span>
+              <span><span className={`status-pill ${student.status.toLowerCase()}`}>{student.status}</span></span>
               <span>{student.year}</span>
-              <span className="status-cell">
-                <span className={`status-pill ${student.status.toLowerCase()}`}>{student.status}</span>
-                <button className="delete-btn" type="button" onClick={() => handleDelete(student.id)}>
-                  Delete
-                </button>
-              </span>
             </div>
           ))}
-
-          {!loading && !error && filteredStudents.length === 0 && (
-            <div className="empty-state">
-              No students match that search yet.
-            </div>
-          )}
+          {!loading && !error && filteredStudents.length === 0 && <div className="empty-state">No students match the current filters.</div>}
         </div>
       </section>
     </>
@@ -380,86 +467,82 @@ function App() {
         <div>
           <p className="eyebrow">STUDENT OPERATIONS</p>
           <h1>Students</h1>
-          <p className="subtitle">Manage admissions, departments, and current academic status.</p>
+          <p className="subtitle">A refined roster for admissions, department visibility, and academic status.</p>
         </div>
-        <button className="primary-btn" type="button" onClick={openModal}>
-          Add Student
-        </button>
+        <button className="primary-btn" type="button" onClick={openCreateModal}>Add Student</button>
       </header>
 
-      <section className="students-panel">
-        <div className="panel-header">
+      <section className="glass-panel filter-panel">
+        <div className="panel-heading">
           <div>
-            <h2>Student roster</h2>
-            <p>Search, filter, and manage the active student list.</p>
-          </div>
-
-          <div className="panel-actions">
-            <label className="search-box" htmlFor="students-view-search">
-              <span>⌕</span>
-              <input
-                id="students-view-search"
-                type="text"
-                placeholder="Search students"
-                value={searchTerm}
-                onChange={(event) => setSearchTerm(event.target.value)}
-              />
-            </label>
-            <button className="secondary-btn" type="button" onClick={cycleFilter}>
-              Filter: {filterStatus}
-            </button>
+            <p className="eyebrow">FILTERS</p>
+            <h3>Student roster</h3>
           </div>
         </div>
 
-        <div className="table-wrap">
-          {deleteState && (
-            <div className={`status-banner ${deleteState.type}`}>
-              {deleteState.text}
-            </div>
-          )}
+        <div className="toolbar">
+          <label className="search-box" htmlFor="student-search">
+            <span>⌕</span>
+            <input id="student-search" type="text" placeholder="Search by name, ID or department" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} />
+          </label>
 
+          <label className="select-pill">
+            <span>Department</span>
+            <select value={departmentFilter} onChange={(event) => setDepartmentFilter(event.target.value)}>
+              <option value="All">All</option>
+              {departments.map((department) => (
+                <option key={department.id} value={department.code?.toUpperCase() || ''}>{department.code}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="select-pill">
+            <span>Status</span>
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+              <option value="All">All</option>
+              <option value="Active">Active</option>
+              <option value="Inactive">Inactive</option>
+              <option value="Graduated">Graduated</option>
+            </select>
+          </label>
+        </div>
+      </section>
+
+      <section className="glass-panel table-panel">
+        {feedback && <div className={`feedback-bar ${feedback.type}`}>{feedback.text}</div>}
+        <div className="table-shell">
           <div className="table-head">
             <span>Student ID</span>
             <span>Name</span>
+            <span>Program</span>
             <span>Department</span>
+            <span>Academic Year</span>
+            <span>Semester</span>
             <span>Admission Year</span>
             <span>Status</span>
+            <span>Actions</span>
           </div>
 
-          {loading && (
-            <div className="empty-state">Loading students from the API…</div>
-          )}
-
-          {!loading && error && (
-            <div className="empty-state">{error}</div>
-          )}
-
+          {loading && <div className="empty-state">Loading students from the API…</div>}
+          {!loading && error && <div className="empty-state">{error}</div>}
           {!loading && !error && filteredStudents.map((student) => (
             <div className="table-row" key={student.id}>
               <span className="mono">{student.id}</span>
-              <div className="student-name">
-                <div className="avatar">{student.name.charAt(0)}</div>
-                <div>
-                  <strong>{student.name}</strong>
-                  <p>{student.department}</p>
-                </div>
-              </div>
-              <span>{student.department}</span>
+              <span>{student.name}</span>
+              <span>{student.departmentCode || 'General'}</span>
+              <span>{student.departmentName || student.department}</span>
               <span>{student.year}</span>
-              <span className="status-cell">
-                <span className={`status-pill ${student.status.toLowerCase()}`}>{student.status}</span>
-                <button className="delete-btn" type="button" onClick={() => handleDelete(student.id)}>
-                  Delete
-                </button>
+              <span>—</span>
+              <span>{student.year}</span>
+              <span><span className={`status-pill ${student.status.toLowerCase()}`}>{student.status}</span></span>
+              <span className="action-stack">
+                <button className="table-action" type="button" onClick={() => openViewModal(student)}>View</button>
+                <button className="table-action" type="button" onClick={() => openEditModal(student)}>Edit</button>
+                <button className="table-action danger" type="button" onClick={() => setDeleteTarget(student)}>Delete</button>
               </span>
             </div>
           ))}
-
-          {!loading && !error && filteredStudents.length === 0 && (
-            <div className="empty-state">
-              No students match that search yet.
-            </div>
-          )}
+          {!loading && !error && filteredStudents.length === 0 && <div className="empty-state">No students match the current search or filters.</div>}
         </div>
       </section>
     </>
@@ -469,10 +552,6 @@ function App() {
     const active = students.filter((student) => student.status === 'Active').length
     const graduated = students.filter((student) => student.status === 'Graduated').length
     const inactive = students.filter((student) => student.status === 'Inactive').length
-    const byDepartment = departments.map((department) => ({
-      ...department,
-      count: students.filter((student) => student.departmentId === department.id).length,
-    }))
 
     return (
       <>
@@ -480,11 +559,12 @@ function App() {
           <div>
             <p className="eyebrow">ACCREDITATION INSIGHTS</p>
             <h1>Reports</h1>
-            <p className="subtitle">Administrative summaries derived from the live student roster.</p>
+            <p className="subtitle">Live summaries derived from the current student roster.</p>
           </div>
+          <button className="primary-btn" type="button">Generate Report</button>
         </header>
 
-        <section className="stats-grid" aria-label="Reports summaries">
+        <section className="stats-grid">
           <article className="stat-card">
             <span>Total students</span>
             <strong>{students.length}</strong>
@@ -507,28 +587,45 @@ function App() {
           </article>
         </section>
 
-        <section className="students-panel">
-          <div className="panel-header">
-            <div>
-              <h2>Department distribution</h2>
-              <p>Actual student counts based on the existing department relationship.</p>
-            </div>
-          </div>
-
-          <div className="table-wrap">
-            <div className="table-head">
-              <span>Department</span>
-              <span>Code</span>
-              <span>Students</span>
-            </div>
-            {byDepartment.map((department) => (
-              <div className="table-row" key={department.id}>
-                <span>{department.name}</span>
-                <span className="mono">{department.code}</span>
-                <span>{department.count}</span>
+        <section className="content-grid">
+          <article className="glass-panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">DEPARTMENT SNAPSHOT</p>
+                <h3>Distribution</h3>
               </div>
-            ))}
-          </div>
+            </div>
+            <div className="report-list">
+              {departmentBreakdown.map((item) => (
+                <div className="report-row" key={item.code}>
+                  <span>{item.code}</span>
+                  <strong>{item.count}</strong>
+                </div>
+              ))}
+            </div>
+          </article>
+
+          <article className="glass-panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">ACADEMIC YEAR VIEW</p>
+                <h3>Admissions trend</h3>
+              </div>
+            </div>
+            <div className="bar-chart" aria-label="Admissions year distribution">
+              {Array.from(new Set(students.map((student) => student.year).filter(Boolean))).map((year) => {
+                const count = students.filter((student) => student.year === year).length
+                return (
+                  <div className="bar-item" key={year}>
+                    <div className="bar-track">
+                      <div className="bar-fill" style={{ height: `${Math.max(16, (count / Math.max(students.length, 1)) * 100)}%` }} />
+                    </div>
+                    <span>{year}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </article>
         </section>
       </>
     )
@@ -540,34 +637,41 @@ function App() {
         <div>
           <p className="eyebrow">SYSTEM SETTINGS</p>
           <h1>Settings</h1>
-          <p className="subtitle">Administrative preferences and operational defaults.</p>
+          <p className="subtitle">Refined administrative controls with frontend-only preferences.</p>
         </div>
       </header>
 
-      <section className="students-panel">
-        <div className="panel-header">
+      <section className="glass-panel settings-panel">
+        <div className="panel-heading">
           <div>
-            <h2>Administration controls</h2>
-            <p>Manage the student platform without changing the dashboard experience.</p>
+            <p className="eyebrow">PROFILE & PREFERENCES</p>
+            <h3>Workplace defaults</h3>
           </div>
         </div>
 
         <div className="settings-grid">
           <article className="setting-card">
-            <h3>Academic defaults</h3>
-            <p>Keep student enrollment workflows aligned with the current program structure.</p>
-            <button className="secondary-btn" type="button">Review defaults</button>
+            <h4>Profile</h4>
+            <p>Review the administrator workspace and current operations overview.</p>
+            <button className="secondary-btn" type="button" onClick={() => setSettingsSection('Profile')}>Open section</button>
           </article>
           <article className="setting-card">
-            <h3>Department mapping</h3>
-            <p>Departments are managed through the existing database relationship and remain consistent across the app.</p>
-            <button className="secondary-btn" type="button">View department list</button>
+            <h4>Appearance</h4>
+            <p>The interface now uses a lighter glass treatment with soft contrast and restrained motion.</p>
+            <button className="secondary-btn" type="button" onClick={() => setSettingsSection('Appearance')}>Open section</button>
           </article>
           <article className="setting-card">
-            <h3>Notifications</h3>
-            <p>Student status updates and approvals can be surfaced through the admin dashboard.</p>
-            <button className="secondary-btn" type="button">Configure alerts</button>
+            <h4>Data</h4>
+            <p>Student lists and reporting remain synchronized with the live FastAPI backend.</p>
+            <button className="secondary-btn" type="button" onClick={() => setSettingsSection('Data')}>Open section</button>
           </article>
+        </div>
+
+        <div className="settings-content">
+          <h4>{settingsSection}</h4>
+          {settingsSection === 'Profile' && <p>The current workspace is optimized for university administration, reporting, and student records.</p>}
+          {settingsSection === 'Appearance' && <p>Glass surfaces use airy white layers, soft depth, and restrained motion for a premium experience.</p>}
+          {settingsSection === 'Data' && <p>The dashboard, roster, and reports are derived from the live student records returned by the existing API.</p>}
         </div>
       </section>
     </>
@@ -593,28 +697,31 @@ function App() {
           <div className="brand-mark">E</div>
           <div>
             <strong>EduTrack</strong>
-            <p>Student hub</p>
+            <p>University Operations</p>
           </div>
         </div>
 
         <nav className="nav-list" aria-label="Sidebar navigation">
           {sidebarItems.map((item) => (
-            <button
-              key={item}
-              className={`nav-item ${activeView === item ? 'active' : ''}`}
-              type="button"
-              onClick={() => setActiveView(item)}
-            >
-              <span className="nav-icon">•</span>
+            <button key={item} className={`nav-item ${activeView === item ? 'active' : ''}`} type="button" onClick={() => setActiveView(item)}>
+              <span className="nav-icon">◦</span>
               {item}
             </button>
           ))}
         </nav>
 
         <div className="sidebar-card">
-          <p className="sidebar-card-label">Enrollment snapshot</p>
-          <strong>94.8%</strong>
-          <span>Retention rate this term</span>
+          <p className="sidebar-card-label">Operational pulse</p>
+          <strong>{students.length}</strong>
+          <span>student profiles currently visible</span>
+        </div>
+
+        <div className="sidebar-footer">
+          <div className="avatar-circle">A</div>
+          <div>
+            <strong>Administrator</strong>
+            <p>System access</p>
+          </div>
         </div>
       </aside>
 
@@ -622,89 +729,89 @@ function App() {
         {renderView()}
       </main>
 
-      {showModal && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="add-student-title">
+      {modalState.open && (
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="student-modal-title">
           <div className="modal-card">
             <div className="modal-header">
               <div>
-                <p className="eyebrow">ADD NEW STUDENT</p>
-                <h3 id="add-student-title">Create student profile</h3>
+                <p className="eyebrow">{modalState.mode === 'view' ? 'Student profile' : modalState.mode === 'edit' ? 'Edit student' : 'Add student'}</p>
+                <h3 id="student-modal-title">{modalState.mode === 'view' ? (selectedStudent?.name || 'Student profile') : modalState.mode === 'edit' ? 'Update student profile' : 'Create student profile'}</h3>
               </div>
-              <button className="modal-close" type="button" onClick={closeModal}>
-                ✕
-              </button>
+              <button className="modal-close" type="button" onClick={closeModal}>✕</button>
             </div>
 
-            <form className="student-form" onSubmit={handleSubmit}>
-              <div className="form-grid">
-                <label className="field">
-                  <span>Student ID</span>
-                  <input
-                    type="text"
-                    name="student_id"
-                    value={formData.student_id}
-                    onChange={handleInputChange}
-                    placeholder="ST-####"
-                  />
-                  {formErrors.student_id && <small>{formErrors.student_id}</small>}
-                </label>
-
-                <label className="field">
-                  <span>Name</span>
-                  <input
-                    type="text"
-                    name="name"
-                    value={formData.name}
-                    onChange={handleInputChange}
-                    placeholder="Full name"
-                  />
-                  {formErrors.name && <small>{formErrors.name}</small>}
-                </label>
-
-                <label className="field">
-                  <span>Department</span>
-                  <select name="department_id" value={formData.department_id} onChange={handleInputChange}>
-                    <option value="">Select department</option>
-                    {departments.map((department) => (
-                      <option key={department.id} value={department.id}>
-                        {department.code} — {department.name}
-                      </option>
-                    ))}
-                  </select>
-                  {formErrors.department_id && <small>{formErrors.department_id}</small>}
-                </label>
-
-                <label className="field">
-                  <span>Admission Year</span>
-                  <input
-                    type="number"
-                    name="admission_year"
-                    value={formData.admission_year}
-                    onChange={handleInputChange}
-                    placeholder="2025"
-                  />
-                  {formErrors.admission_year && <small>{formErrors.admission_year}</small>}
-                </label>
-
-                <label className="field">
-                  <span>Status</span>
-                  <select name="status" value={formData.status} onChange={handleInputChange}>
-                    <option value="ACTIVE">ACTIVE</option>
-                    <option value="GRADUATED">GRADUATED</option>
-                    <option value="INACTIVE">INACTIVE</option>
-                  </select>
-                </label>
+            {modalState.mode === 'view' && selectedStudent ? (
+              <div className="detail-list">
+                <div className="detail-row"><span>Student ID</span><strong>{selectedStudent.id}</strong></div>
+                <div className="detail-row"><span>Name</span><strong>{selectedStudent.name}</strong></div>
+                <div className="detail-row"><span>Department</span><strong>{selectedStudent.departmentName || selectedStudent.department}</strong></div>
+                <div className="detail-row"><span>Academic Year</span><strong>{selectedStudent.year}</strong></div>
+                <div className="detail-row"><span>Status</span><strong>{selectedStudent.status}</strong></div>
               </div>
+            ) : (
+              <form className="student-form" onSubmit={handleCreateOrUpdate}>
+                <div className="form-grid">
+                  <label className="field">
+                    <span>Student ID</span>
+                    <input type="text" name="student_id" value={formData.student_id} onChange={handleInputChange} placeholder="ST-####" />
+                    {formErrors.student_id && <small>{formErrors.student_id}</small>}
+                  </label>
 
-              <div className="modal-actions">
-                <button className="secondary-btn" type="button" onClick={closeModal}>
-                  Cancel
-                </button>
-                <button className="primary-btn" type="submit" disabled={isSubmitting}>
-                  {isSubmitting ? 'Creating…' : 'Create Student'}
-                </button>
-              </div>
-            </form>
+                  <label className="field">
+                    <span>Name</span>
+                    <input type="text" name="name" value={formData.name} onChange={handleInputChange} placeholder="Full name" />
+                    {formErrors.name && <small>{formErrors.name}</small>}
+                  </label>
+
+                  <label className="field">
+                    <span>Department</span>
+                    <select name="department_id" value={formData.department_id} onChange={handleInputChange}>
+                      <option value="">Select department</option>
+                      {departments.map((department) => (
+                        <option key={department.id} value={department.id}>{department.code} — {department.name}</option>
+                      ))}
+                    </select>
+                    {formErrors.department_id && <small>{formErrors.department_id}</small>}
+                  </label>
+
+                  <label className="field">
+                    <span>Admission Year</span>
+                    <input type="number" name="admission_year" value={formData.admission_year} onChange={handleInputChange} placeholder="2025" />
+                    {formErrors.admission_year && <small>{formErrors.admission_year}</small>}
+                  </label>
+
+                  <label className="field">
+                    <span>Status</span>
+                    <select name="status" value={formData.status} onChange={handleInputChange}>
+                      <option value="ACTIVE">ACTIVE</option>
+                      <option value="GRADUATED">GRADUATED</option>
+                      <option value="INACTIVE">INACTIVE</option>
+                    </select>
+                  </label>
+                </div>
+
+                {feedback && <div className={`feedback-bar ${feedback.type}`}>{feedback.text}</div>}
+
+                <div className="modal-actions">
+                  <button className="secondary-btn" type="button" onClick={closeModal}>Cancel</button>
+                  <button className="primary-btn" type="submit" disabled={isSubmitting}>{isSubmitting ? (modalState.mode === 'edit' ? 'Saving…' : 'Creating…') : (modalState.mode === 'edit' ? 'Save changes' : 'Create student')}</button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-card confirm-card">
+            <p className="eyebrow">Confirm deletion</p>
+            <h3>Delete {deleteTarget.name}?</h3>
+            <p>This action removes the student profile from the live API roster.</p>
+            <div className="modal-actions">
+              <button className="secondary-btn" type="button" onClick={() => setDeleteTarget(null)}>Cancel</button>
+              <button className="primary-btn danger" type="button" onClick={confirmDelete}>Delete</button>
+            </div>
           </div>
         </div>
       )}
